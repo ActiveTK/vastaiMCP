@@ -67,7 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): VastConfig {
     baseUrl: (env.VAST_URL || "https://console.vast.ai").replace(/\/+$/, ""),
     sshPrivateKeyPath: privateKeyPath,
     sshPublicKey: publicKey,
-    retry: Number(env.VAST_RETRY || 3),
+    retry: Number(env.VAST_RETRY || 6),
   };
 }
 

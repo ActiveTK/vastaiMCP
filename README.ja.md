@@ -68,7 +68,7 @@ claude mcp add vastai -e VAST_API_KEY=your_key -- node /path/to/vastaiMCP/dist/i
 | `VAST_SSH_KEY` | `~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa` の最初に見つかったもの | `vast_run` / `vast_copy_file` / SSH 疎通確認に使う秘密鍵 |
 | `VAST_SSH_PUBLIC_KEY` | `<VAST_SSH_KEY>.pub` | 起動前にアカウントへ登録する公開鍵（パスまたは文字列） |
 | `VAST_SSH_PASSPHRASE` | – | 秘密鍵のパスフレーズ |
-| `VAST_RETRY` | `3` | HTTP 429 時のリトライ回数 |
+| `VAST_RETRY` | `6` | HTTP 429 時のリトライ回数（指数バックオフ。200 台規模の fleet で効く） |
 | `VAST_MCP_STATE_DIR` | `~/.vastai-mcp/fleets` | fleet の状態（期限、インスタンス id）の保存先 |
 
 ## ツール一覧

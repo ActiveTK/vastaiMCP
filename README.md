@@ -69,7 +69,7 @@ See [examples/mcp-config.json](examples/mcp-config.json).
 | `VAST_SSH_KEY` | first of `~/.ssh/id_ed25519`, `id_rsa`, `id_ecdsa` | private key for `vast_run` / `vast_copy_file` / SSH readiness checks |
 | `VAST_SSH_PUBLIC_KEY` | `<VAST_SSH_KEY>.pub` | public key (path or literal) registered on the account before launch |
 | `VAST_SSH_PASSPHRASE` | – | passphrase for the private key |
-| `VAST_RETRY` | `3` | retries on HTTP 429 |
+| `VAST_RETRY` | `6` | retries on HTTP 429 (exponential backoff; matters for 200-instance fleets) |
 | `VAST_MCP_STATE_DIR` | `~/.vastai-mcp/fleets` | where fleet state (deadlines, instance ids) is persisted |
 
 ## Tools

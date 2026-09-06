@@ -54,6 +54,8 @@ export interface LaunchParams {
     size_gb?: number;
     name?: string;
   };
+  /** Poll interval for status checks (seconds); mainly for tests. */
+  pollIntervalS?: number;
   onProgress?: (msg: string) => void;
 }
 
@@ -232,7 +234,7 @@ export async function launchInstance(api: VastApi, cfg: VastConfig, p: LaunchPar
     }
 
     // 4. Wait for running
-    const w = await waitForInstance(api, instanceId, { target: "running", timeoutS: p.timeout_s ?? 600, onProgress: progress });
+    const w = await waitForInstance(api, instanceId, { target: "running", timeoutS: p.timeout_s ?? 600, intervalS: p.pollIntervalS, onProgress: progress });
     if (!w.ok) {
       attempts.push({ offer_id: offer.id, instance_id: instanceId, outcome: "wait_failed", detail: w.reason, history: w.history });
       if (p.destroy_on_failure ?? true) {

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "vastai": {
+      "command": "node",
+      "args": ["/path/to/vastaiMCP/dist/index.js"],
+      "env": {
+        "VAST_API_KEY": "your_vast_api_key",
+        "VAST_SSH_KEY": "/home/you/.ssh/id_ed25519",
+        "VAST_SSH_PUBLIC_KEY": "/home/you/.ssh/id_ed25519.pub"
+      }
+    }
+  }
+}

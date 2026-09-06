@@ -30,7 +30,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function waitForInstance(api: VastApi, id: number, opts: WaitOptions): Promise<WaitResult> {
   const timeoutS = opts.timeoutS ?? 600;
-  const intervalS = Math.max(2, opts.intervalS ?? 5);
+  const intervalS = Math.max(0.01, opts.intervalS ?? 5);
   const started = Date.now();
   const history: string[] = [];
   let unknownStreak = 0;

@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { sshEndpoint } from "../format.js";
+import { buildOnstart } from "../onstart.js";
 import { shellQuote, sshExec } from "../ssh.js";
 import { pMap } from "../util.js";
-import { envShape, guard, ok, offerFilterShape, progressReporter, type ToolContext } from "./common.js";
+import { envShape, guard, ok, offerFilterShape, onstartShape, progressReporter, type ToolContext } from "./common.js";
 
 const fleetName = z.string().regex(/^[A-Za-z0-9._-]{1,64}$/).describe("Fleet name (letters, digits, . _ -).");
 
@@ -27,7 +28,7 @@ export function registerFleetTools({ server, fleets, cfg }: ToolContext) {
         template_hash: z.string().optional().describe("vast.ai template hash (from vast_templates)."),
         disk_gb: z.number().min(1).optional().describe("Disk per instance in GB (default 20)."),
         ...envShape,
-        onstart_cmd: z.string().optional().describe("Startup script run in every container."),
+        ...onstartShape,
         runtype: z.enum(["ssh", "jupyter", "args"]).optional().describe('Default "ssh". Ignored with template_hash.'),
         direct: z.boolean().optional().describe("Prefer direct connections (default true)."),
         bid_price: z.number().optional().describe("Use interruptible pricing with this bid (USD/hour per instance)."),
@@ -48,12 +49,13 @@ export function registerFleetTools({ server, fleets, cfg }: ToolContext) {
     },
     guard(async (a, extra) => {
       const {
-        count, ttl_minutes, name, image, template_hash, disk_gb, env, ports, hostname, docker_options, onstart_cmd, runtype, direct, bid_price, image_login,
+        count, ttl_minutes, name, image, template_hash, disk_gb, env, ports, hostname, docker_options, onstart_cmd, screens, apt_packages, runtype, direct, bid_price, image_login,
         unique_machines, overprovision, create_concurrency, replace_failed, max_replacements, self_destruct, max_total_cost_usd, dry_run, wait_for_running, timeout_s,
         ...filters
       } = a;
       const r = await fleets.launch({
-        count, ttl_minutes, name, image, template_hash, disk_gb, env: { env, ports, hostname, docker_options }, onstart_cmd, runtype, direct, bid_price, image_login,
+        count, ttl_minutes, name, image, template_hash, disk_gb, env: { env, ports, hostname, docker_options },
+        onstart_cmd: buildOnstart({ onstart_cmd, screens, apt_packages }), runtype, direct, bid_price, image_login,
         filters, unique_machines, overprovision, create_concurrency, replace_failed, max_replacements, self_destruct, max_total_cost_usd, dry_run, wait_for_running, timeout_s,
         onProgress: progressReporter(extra),
       });
@@ -123,6 +125,34 @@ export function registerFleetTools({ server, fleets, cfg }: ToolContext) {
       );
       const res = ok({ results });
       if (results.some((r) => !r.verified)) res.isError = true;
+      return res;
+    }),
+  );
+
+  server.registerTool(
+    "vast_fleet_control",
+    {
+      title: "Stop / start / wait for a whole fleet",
+      description:
+        "Fleet-wide power control for warm-pool workflows. stop: park every instance (disk kept, no GPU charge) once it is prepared. " +
+        "start: resume all instances at the same moment (the onstart script and its screen sessions run again on every start) and wait until each has been seen running " +
+        "running_streak polls in a row; instances that never get there are destroyed (destroy_stragglers). wait: only wait for running. " +
+        "Typical: vast_fleet_launch → vast_fleet_control wait → vast_fleet_control stop → … → vast_fleet_control start (synchronised job start). " +
+        "Blocks up to timeout_s; the fleet deadline keeps applying throughout.",
+      inputSchema: {
+        name: fleetName,
+        action: z.enum(["stop", "start", "wait"]),
+        timeout_s: z.number().int().min(10).max(7200).optional().describe("Max seconds to wait for all instances (default 1800)."),
+        running_streak: z.number().int().min(1).max(10).optional().describe("Consecutive polls an instance must report running before it counts (default 2)."),
+        poll_s: z.number().int().min(2).max(120).optional().describe("Seconds between instance-list polls (default 15)."),
+        destroy_stragglers: z.boolean().optional().describe("For start/wait: destroy instances that miss the timeout (default true)."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    guard(async ({ name, action, timeout_s, running_streak, poll_s, destroy_stragglers }, extra) => {
+      const r = await fleets.control(name, action, { timeoutS: timeout_s, runningStreak: running_streak, pollS: poll_s, destroyStragglers: destroy_stragglers, onProgress: progressReporter(extra) });
+      const res = ok(r);
+      if (!r.ok) res.isError = true;
       return res;
     }),
   );

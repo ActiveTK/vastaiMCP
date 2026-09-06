@@ -122,6 +122,15 @@ export class VastApi {
     return this.client.put(`/instances/${id}/`, { json: { state } });
   }
 
+  /** vast.py start_instance / stop_instance (list form): PUT /instances/ {state, ids}; chunked like bulk destroy. */
+  async setInstancesState(ids: number[], state: "running" | "stopped"): Promise<{ success: boolean; msg?: string }[]> {
+    const out: { success: boolean; msg?: string }[] = [];
+    for (let i = 0; i < ids.length; i += 64) {
+      out.push(await this.client.put("/instances/", { json: { state, ids: ids.slice(i, i + 64) } }));
+    }
+    return out;
+  }
+
   /** vast.py reboot__instance: PUT /instances/reboot/{id}/. */
   async rebootInstance(id: number): Promise<{ success: boolean; msg?: string }> {
     return this.client.put(`/instances/reboot/${id}/`, { json: {} });

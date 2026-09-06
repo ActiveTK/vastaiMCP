@@ -83,7 +83,7 @@ claude mcp add vastai -e VAST_API_KEY=your_key -- node /path/to/vastaiMCP/dist/i
 | `vast_instance` | 単一インスタンスの詳細（状態メッセージ、SSH コマンド、公開ポート、Jupyter URL、環境変数） |
 | `vast_wait_instance` | `running` / `stopped` になるまで待機。終端状態の検知とタイムアウト付き |
 | `vast_instance_control` | start / stop / reboot（結果の状態になるまで待機可） |
-| `vast_destroy` | インスタンスの破棄（課金停止） |
+| `vast_destroy` | id 指定、または `all=true` + 状態 / ラベルのフィルタ（例: running 以外を全部）で破棄。一括 DELETE と一覧での検証付き |
 | `vast_update_instance` | ラベル変更、スポットインスタンスの入札額変更 |
 | `vast_logs` | コンテナ / ホストデーモンのログ（tail、フィルタ） |
 | `vast_ssh_keys` | アカウント鍵の list / add / delete、稼働中インスタンスへの attach / detach |
@@ -95,6 +95,7 @@ claude mcp add vastai -e VAST_API_KEY=your_key -- node /path/to/vastaiMCP/dist/i
 | **`vast_fleet_launch`** | **N 台を一括で借りて寿命（TTL）を固定**: 検索・順位付け（`strategy: most_cpu` など）・1 マシン 1 台・並列作成・バックグラウンド監視・死んだ台の補充・期限での確実な破棄 |
 | `vast_fleet_status` | 状態別台数、稼働数、残り秒数、ここまでのコスト、破棄の進捗、各メンバーの SSH 接続先 |
 | `vast_fleet_list` | ディスクに永続化された全 fleet |
+| `vast_fleet_control` | fleet 全体の `stop` / `start` / `wait`: 準備済みの台を停止しておき、後で全台を同時に起動（Running 連続 N 回で準備完了判定、間に合わない台は破棄） |
 | `vast_fleet_run` | fleet の稼働中インスタンス全部に SSH でコマンドを並列実行 |
 | `vast_fleet_extend` | fleet の期限を延長 |
 | `vast_fleet_destroy` | fleet（または全 fleet）を即時破棄。インスタンス一覧で消えたことを検証 |
@@ -148,6 +149,31 @@ node dist/index.js fleets        # 保存されている fleet を表示
 
 注意: TTL は fleet 作成時刻から数えます（各台が `running` になった時刻からではありません）。ストレージは作成時から、
 GPU は `running` から課金されます。`vast_fleet_status.estimated_cost_usd` は価格 × 稼働時間の合計です。
+
+### ウォームプール: 準備 → 停止 → 全台同時起動
+
+vast は onstart スクリプトを**起動のたびに**実行するので、fleet を準備（イメージ取得、パッケージ導入、`screen`
+セッション定義）してから `stop` で寝かせておき、後で `start` すると全ジョブが数秒以内に一斉に始まります。
+いわゆる「ローダー」スクリプトのパターンです。
+
+```text
+› vast_fleet_launch  {"name": "load", "count": 100, "ttl_minutes": 240, "image": "vastai/base-image:@vastai-automatic-tag",
+                      "disk_gb": 8, "strategy": "most_cpu", "min_cpu_cores": 8,
+                      "screens": [{"name": "loader", "command": "python3 /work/run.py"}], "dry_run": true}
+                      → 候補一覧 + totals { vcpus, ram_gb, hourly_usd } + 概算コスト
+› vast_fleet_launch  {… "dry_run": false}
+› vast_fleet_control {"name": "load", "action": "wait",  "running_streak": 2, "timeout_s": 1800}   ← 準備完了。間に合わない台は破棄
+› vast_fleet_control {"name": "load", "action": "stop"}                                            ← 停止。ストレージ課金のみ
+   … 後で …
+› vast_fleet_control {"name": "load", "action": "start", "running_streak": 2}                      ← 全台同時起動。screen も再起動
+› vast_fleet_status  {"name": "load"}   /  vast_fleet_run {"name": "load", "command": "tail -n 3 /work/loader.log"}
+› vast_fleet_destroy {"name": "load"}   （または期限を待つ）
+```
+
+`screens` は従来のローダースクリプトと同じシェル（`dpkg --configure -a`、`apt-get install -y screen curl`、`mkdir -p /work`、
+`screen -S <name> -dm bash -lc '<cmd> >>/work/<name>.log 2>&1'`）に展開されます。`apt_packages` で追加パッケージ、
+`onstart_cmd` は screen の前に挿入されます。アカウント全体に対する `--status` / `--destroy` / `--cleanup` 相当は
+`vast_list_instances`（`totals` 付き）、`vast_destroy {"all": true}`、`vast_destroy {"all": true, "exclude_status": ["running"]}` です。
 
 ### 利用例
 

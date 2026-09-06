@@ -1,6 +1,7 @@
 import { z } from "zod";
+import { buildOnstart } from "../onstart.js";
 import { launchInstance } from "../workflows/launch.js";
-import { envShape, guard, ok, offerFilterShape, progressReporter, type ToolContext } from "./common.js";
+import { envShape, guard, ok, offerFilterShape, onstartShape, progressReporter, type ToolContext } from "./common.js";
 
 export function registerLaunchTools({ server, api, cfg }: ToolContext) {
   server.registerTool(
@@ -22,7 +23,7 @@ export function registerLaunchTools({ server, api, cfg }: ToolContext) {
         template_hash: z.string().optional().describe("vast.ai template hash (from vast_templates). When set, image/runtype come from the template."),
         disk_gb: z.number().min(1).optional().describe("Local disk size in GB (default 20). Also used as the minimum disk filter."),
         ...envShape,
-        onstart_cmd: z.string().optional().describe("Shell script run inside the container at every start (e.g. pip install ... ). Runs as root in the background."),
+        ...onstartShape,
         runtype: z.enum(["ssh", "jupyter", "args"]).optional().describe('"ssh" (default) injects sshd; "jupyter" also starts Jupyter; "args" runs the image entrypoint as-is (no ssh).'),
         direct: z.boolean().optional().describe("Use direct (faster) connections for ssh/jupyter when the host offers them (default true; falls back to proxy)."),
         jupyter_lab: z.boolean().optional().describe("For runtype jupyter: launch JupyterLab instead of Notebook."),
@@ -56,7 +57,7 @@ export function registerLaunchTools({ server, api, cfg }: ToolContext) {
     },
     guard(async (args, extra) => {
       const {
-        offer_id, image, template_hash, disk_gb, env, ports, hostname, docker_options, onstart_cmd, runtype, direct, jupyter_lab, jupyter_dir,
+        offer_id, image, template_hash, disk_gb, env, ports, hostname, docker_options, onstart_cmd, screens, apt_packages, runtype, direct, jupyter_lab, jupyter_dir,
         entrypoint, args: entryArgs, label, bid_price, image_login, cancel_unavail, ssh_public_key, register_ssh_key, wait_for_running, timeout_s,
         wait_for_ssh, ssh_timeout_s, max_attempts, destroy_on_failure, volume, ...filters
       } = args;
@@ -67,7 +68,7 @@ export function registerLaunchTools({ server, api, cfg }: ToolContext) {
         template_hash,
         disk_gb,
         env: { env, ports, hostname, docker_options },
-        onstart_cmd,
+        onstart_cmd: buildOnstart({ onstart_cmd, screens, apt_packages }),
         runtype,
         direct,
         jupyter_lab,

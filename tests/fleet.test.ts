@@ -21,8 +21,9 @@ interface Call {
  * Fake vast.ai covering: bundles search, asks create, v1 instance list, single get, bulk + single delete.
  * Instances progress created -> loading -> running on each list poll unless a script says otherwise.
  */
-function fakeApi(opts: { offers?: number; createFailsFor?: number[]; bulkDeleteFails?: number; dieAfterRunning?: number[]; sameMachine?: boolean } = {}) {
+function fakeApi(opts: { offers?: number; createFailsFor?: number[]; bulkDeleteFails?: number; dieAfterRunning?: number[]; sameMachine?: boolean; stuckOnStart?: number } = {}) {
   const calls: Call[] = [];
+  let stuckLeft = opts.stuckOnStart ?? 0;
   const live = new Map<number, { label: string | null; status: string; polls: number; machine_id: number; dph: number }>();
   let nextId = 5000;
   let bulkFailsLeft = opts.bulkDeleteFails ?? 0;
@@ -78,6 +79,18 @@ function fakeApi(opts: { offers?: number; createFailsFor?: number[]; bulkDeleteF
     }
     if (one && method === "DELETE") {
       live.delete(Number(one[1]));
+      return json({ success: true });
+    }
+    if (url.pathname === "/api/v0/instances/" && method === "PUT") {
+      for (const id of body.ids as number[]) {
+        const s = live.get(id);
+        if (!s) continue;
+        if (body.state === "stopped") s.status = "stopped";
+        else if (stuckLeft > 0) {
+          stuckLeft--;
+          s.status = "stuck";
+        } else s.status = "loading";
+      }
       return json({ success: true });
     }
     if (url.pathname === "/api/v0/instances/" && method === "DELETE") {
@@ -197,6 +210,46 @@ describe("FleetManager.launch", () => {
     expect(f.members.filter((x) => !x.destroyed_at)).toHaveLength(2);
     await m.terminate("t2", "test");
   });
+});
+
+describe("FleetManager.control (warm pool: wait → stop → start)", () => {
+  it("waits for a running streak, stops everything, then starts everything at once", async () => {
+    const { api, calls, live } = fakeApi();
+    const m = manager(api, tmpStore());
+    await m.launch({ name: "c1", count: 3, ttl_minutes: 30, image: "i" });
+    const w = await m.control("c1", "wait", { runningStreak: 2, pollS: 2 });
+    expect(w.ok).toBe(true);
+    expect(w.reached).toBe(3);
+    expect(m.summarize(m.get("c1")!).totals.vcpus).toBe(64 + 60 + 56);
+
+    const s = await m.control("c1", "stop", { pollS: 2 });
+    expect(s.ok).toBe(true);
+    expect(s.target).toBe("stopped");
+    expect([...live.values()].every((x) => x.status === "stopped")).toBe(true);
+    const stopCall = calls.find((c) => c.method === "PUT" && c.path === "/api/v0/instances/" && (c.body as { state: string }).state === "stopped")!;
+    expect((stopCall.body as { ids: number[] }).ids).toHaveLength(3);
+
+    const st = await m.control("c1", "start", { runningStreak: 2, pollS: 2 });
+    expect(st.ok).toBe(true);
+    expect(st.reached).toBe(3);
+    expect(st.destroyed_ids).toEqual([]);
+    expect([...live.values()].every((x) => x.status === "running")).toBe(true);
+    await m.terminate("c1", "test");
+  }, 30_000);
+
+  it("destroys stragglers that never come back after start", async () => {
+    const { api, live } = fakeApi({ stuckOnStart: 1 });
+    const m = manager(api, tmpStore());
+    await m.launch({ name: "c2", count: 2, ttl_minutes: 30, image: "i" });
+    await m.control("c2", "wait", { runningStreak: 1, pollS: 2 });
+    await m.control("c2", "stop", { pollS: 2 });
+    const st = await m.control("c2", "start", { runningStreak: 1, pollS: 2, timeoutS: 5 });
+    expect(st.ok).toBe(false);
+    expect(st.destroyed_ids).toHaveLength(1);
+    expect(st.alive).toBe(1);
+    expect(live.size).toBe(1);
+    await m.terminate("c2", "test");
+  }, 30_000);
 });
 
 describe("FleetManager.terminate", () => {

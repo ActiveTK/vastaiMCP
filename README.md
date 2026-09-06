@@ -84,7 +84,7 @@ See [examples/mcp-config.json](examples/mcp-config.json).
 | `vast_instance` | One instance: status message, SSH command, published ports, Jupyter URL, env |
 | `vast_wait_instance` | Block until `running` / `stopped` with terminal-state detection and timeout |
 | `vast_instance_control` | start / stop / reboot (optionally waits for the resulting state) |
-| `vast_destroy` | Destroy one or more instances (stops all billing) |
+| `vast_destroy` | Destroy instances by id, or `all=true` with status / label filters (e.g. everything not running); bulk DELETE, verified against the instance list |
 | `vast_update_instance` | Change label or raise the bid of an interruptible instance |
 | `vast_logs` | Container or host-daemon logs, with tail / filter |
 | `vast_ssh_keys` | list / add / delete account keys; attach / detach keys on a running instance |
@@ -96,6 +96,7 @@ See [examples/mcp-config.json](examples/mcp-config.json).
 | **`vast_fleet_launch`** | **Rent N machines at once with a hard TTL**: search, rank (`strategy: most_cpu` …), one per machine, parallel create, background monitor, replacement of dead instances, guaranteed destruction at the deadline |
 | `vast_fleet_status` | Per-status counts, alive/running, seconds remaining, cost so far, termination progress, members with SSH endpoints |
 | `vast_fleet_list` | All fleets persisted on disk |
+| `vast_fleet_control` | `stop` / `start` / `wait` for the whole fleet: park prepared instances, then start them all at the same moment (running-streak readiness, stragglers destroyed) |
 | `vast_fleet_run` | Run a command over SSH on every running instance of a fleet in parallel |
 | `vast_fleet_extend` | Push a fleet's deadline back |
 | `vast_fleet_destroy` | Destroy a fleet (or all fleets) now, verified against the instance list |
@@ -150,6 +151,31 @@ node dist/index.js fleets        # show persisted fleets
 
 Notes: the TTL is measured from fleet creation, not from when each instance reaches `running`. Storage is billed
 from creation, GPU time from `running`; `vast_fleet_status.estimated_cost_usd` sums price × running time.
+
+### Warm pool: prepare, stop, start everything at once
+
+Because vast runs the onstart script on *every* start, a fleet can be prepared (image pulled, packages installed,
+`screen` sessions defined), parked with `stop`, and later resumed so that all jobs begin within the same few
+seconds — the pattern of a typical "loader" script:
+
+```text
+› vast_fleet_launch  {"name": "load", "count": 100, "ttl_minutes": 240, "image": "vastai/base-image:@vastai-automatic-tag",
+                      "disk_gb": 8, "strategy": "most_cpu", "min_cpu_cores": 8,
+                      "screens": [{"name": "loader", "command": "python3 /work/run.py"}], "dry_run": true}
+                      → candidates + totals { vcpus, ram_gb, hourly_usd } + estimated cost
+› vast_fleet_launch  {… "dry_run": false}
+› vast_fleet_control {"name": "load", "action": "wait",  "running_streak": 2, "timeout_s": 1800}   ← prepared; stragglers destroyed
+› vast_fleet_control {"name": "load", "action": "stop"}                                            ← parked, storage-only billing
+   … later …
+› vast_fleet_control {"name": "load", "action": "start", "running_streak": 2}                      ← everyone starts now; screens relaunch
+› vast_fleet_status  {"name": "load"}   /  vast_fleet_run {"name": "load", "command": "tail -n 3 /work/loader.log"}
+› vast_fleet_destroy {"name": "load"}   (or wait for the deadline)
+```
+
+`screens` expands to the same shell as the classic loader script (`dpkg --configure -a`, `apt-get install -y screen curl`,
+`mkdir -p /work`, `screen -S <name> -dm bash -lc '<cmd> >>/work/<name>.log 2>&1'`); `apt_packages` adds more packages and
+`onstart_cmd` is inserted before the screens. Account-wide equivalents of `--status`, `--destroy` and `--cleanup` are
+`vast_list_instances` (with `totals`), `vast_destroy {"all": true}` and `vast_destroy {"all": true, "exclude_status": ["running"]}`.
 
 ### Example session
 

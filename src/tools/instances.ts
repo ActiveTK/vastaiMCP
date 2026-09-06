@@ -22,9 +22,17 @@ export function registerInstanceTools({ server, api }: ToolContext) {
       if (label) rows = rows.filter((r) => (r.label ?? "").toLowerCase().includes(label.toLowerCase()));
       const summaries = rows.map((r) => summarizeInstance(r));
       const hourly = summaries.filter((s) => s.status === "running").reduce((a, s) => a + (s.price_per_hour ?? 0), 0);
+      const totals = rows.reduce(
+        (a, r) => ({ vcpus: a.vcpus + (r.cpu_cores_effective ?? 0), ram_gb: a.ram_gb + (r.cpu_ram ?? 0) / 1000, hourly_usd: a.hourly_usd + (r.dph_total ?? 0) }),
+        { vcpus: 0, ram_gb: 0, hourly_usd: 0 },
+      );
+      const byStatus: Record<string, number> = {};
+      for (const s of summaries) byStatus[s.status] = (byStatus[s.status] ?? 0) + 1;
       return ok({
         count: summaries.length,
+        by_status: byStatus,
         running_cost_per_hour_usd: Number(hourly.toFixed(4)),
+        totals: { vcpus: Math.round(totals.vcpus), ram_gb: Math.round(totals.ram_gb), hourly_usd_if_all_running: Number(totals.hourly_usd.toFixed(3)) },
         instances: summaries,
         raw: include_raw ? rows : undefined,
       });
@@ -99,11 +107,32 @@ export function registerInstanceTools({ server, api }: ToolContext) {
     "vast_destroy",
     {
       title: "Destroy instances",
-      description: "Permanently destroy one or more instances. This deletes the instance disk and stops all billing. Irreversible. Use when a job is finished.",
-      inputSchema: { instance_ids: z.array(instanceIdSchema).min(1).describe("Instance ids to destroy.") },
+      description:
+        "Permanently destroy instances. This deletes the instance disk and stops all billing. Irreversible. " +
+        "Select by instance_ids, or all=true, optionally narrowed by only_status / exclude_status (e.g. exclude_status=[\"running\"] = clean up everything that is not running) and label_contains. " +
+        "Uses bulk DELETE (64 per request) and, with verify=true, re-reads the instance list until the ids are gone.",
+      inputSchema: {
+        instance_ids: z.array(instanceIdSchema).optional().describe("Instance ids to destroy."),
+        all: z.boolean().optional().describe("Destroy every instance on the account (after the status/label filters)."),
+        only_status: z.array(z.string()).optional().describe('With all=true: only these actual_status values, e.g. ["stopped","exited"].'),
+        exclude_status: z.array(z.string()).optional().describe('With all=true: skip these statuses, e.g. ["running"].'),
+        label_contains: z.string().optional().describe("With all=true: only instances whose label contains this text."),
+        verify: z.boolean().optional().describe("Poll the instance list until the ids are gone (default true, up to verify_timeout_s)."),
+        verify_timeout_s: z.number().int().min(5).max(600).optional().describe("Default 120."),
+      },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
-    guard(async ({ instance_ids }) => {
+    guard(async ({ instance_ids, all, only_status, exclude_status, label_contains, verify, verify_timeout_s }) => {
+      let ids = instance_ids ?? [];
+      if (all) {
+        let rows = await api.listInstances();
+        if (only_status?.length) rows = rows.filter((r) => only_status.includes(r.actual_status ?? "provisioning"));
+        if (exclude_status?.length) rows = rows.filter((r) => !exclude_status.includes(r.actual_status ?? "provisioning"));
+        if (label_contains) rows = rows.filter((r) => (r.label ?? "").toLowerCase().includes(label_contains.toLowerCase()));
+        ids = [...new Set([...ids, ...rows.map((r) => r.id)])];
+      }
+      if (!ids.length) return ok({ results: [], message: all ? "No instances matched the filters." : "Give instance_ids or all=true." });
+      instance_ids = ids;
       // Bulk DELETE /instances/ (64 per request, as the CLI does); fall back to per-id deletes on failure.
       const results: { instance_id: number; destroyed: boolean; message?: string }[] = [];
       try {
@@ -121,7 +150,18 @@ export function registerInstanceTools({ server, api }: ToolContext) {
           }
         }
       }
-      const res = ok({ results });
+      let remaining: number[] = [];
+      if (verify ?? true) {
+        const deadline = Date.now() + (verify_timeout_s ?? 120) * 1000;
+        while (true) {
+          const present = new Set((await api.listInstances()).map((r) => r.id));
+          remaining = ids.filter((id) => present.has(id));
+          if (!remaining.length || Date.now() >= deadline) break;
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        for (const r of results) if (remaining.includes(r.instance_id)) { r.destroyed = false; r.message = (r.message ? r.message + "; " : "") + "still listed after verify timeout"; }
+      }
+      const res = ok({ requested: ids.length, destroyed: results.filter((r) => r.destroyed).length, verified: (verify ?? true) && !remaining.length, remaining_ids: remaining, results });
       if (results.some((r) => !r.destroyed)) res.isError = true;
       return res;
     }),

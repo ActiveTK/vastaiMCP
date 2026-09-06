@@ -89,6 +89,15 @@ export const offerFilterShape = {
   order: z.string().optional().describe('Explicit sort, comma-separated; suffix "-" for descending, e.g. "dph_total" or "dlperf_usd-". Overrides strategy.'),
 };
 
+export const onstartShape = {
+  onstart_cmd: z.string().optional().describe("Shell script run inside the container at every start (also after stop → start). Runs as root."),
+  screens: z
+    .array(z.object({ name: z.string().optional().describe("screen session name (default main, job2, ...)"), command: z.string().describe("command run via bash -lc; output goes to /work/<name>.log") }))
+    .optional()
+    .describe('Detached GNU screen sessions started at every boot, e.g. [{"name":"loader","command":"python3 /work/run.py"}]. screen+curl are apt-installed first.'),
+  apt_packages: z.array(z.string()).optional().describe("apt packages to install before onstart_cmd/screens run."),
+};
+
 export const envShape = {
   env: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional().describe('Environment variables for the container, e.g. {"HF_TOKEN": "hf_xxx", "MODEL_NAME": "Qwen/Qwen2.5-3B-Instruct"}.'),
   ports: z.array(z.union([z.string(), z.number()])).optional().describe('Container ports to publish, e.g. [8080, "8081:8081/udp"]. Requires a host with direct ports.'),

@@ -63,6 +63,8 @@ export interface FleetSummary {
   running: number;
   estimated_cost_usd: number;
   hourly_cost_usd: number;
+  /** vCPU / RAM / price totals over alive members (what the fleet can throw at a job) */
+  totals: FleetTotals;
   replacements_made: number;
   create_failures: number;
   termination?: Fleet["termination"] & { remaining_ids?: number[] };
@@ -72,7 +74,7 @@ export interface FleetSummary {
 
 export interface FleetLaunchResult {
   fleet?: FleetSummary;
-  dry_run?: { candidates: OfferSummary[]; estimated_cost_usd: number; search_returned: number; after_dedupe: number };
+  dry_run?: { candidates: OfferSummary[]; totals: FleetTotals; estimated_cost_usd: number; search_returned: number; after_dedupe: number };
   notes: string[];
 }
 
@@ -84,6 +86,34 @@ export interface TerminateResult {
   remaining_ids: number[];
   rounds: number;
   last_error?: string;
+}
+
+export interface FleetControlResult {
+  name: string;
+  action: "stop" | "start" | "wait";
+  ok: boolean;
+  target: "stopped" | "running";
+  reached: number;
+  pending_ids: number[];
+  destroyed_ids: number[];
+  alive: number;
+  elapsed_s: number;
+  seconds_remaining: number;
+}
+
+export interface FleetTotals {
+  instances: number;
+  vcpus: number;
+  ram_gb: number;
+  hourly_usd: number;
+}
+
+export function totalsOf(rows: { cpu_cores?: number; cpu_ram_gb?: number; price_per_hour?: number }[]): FleetTotals {
+  const t = rows.reduce(
+    (a, r) => ({ vcpus: a.vcpus + (r.cpu_cores ?? 0), ram_gb: a.ram_gb + (r.cpu_ram_gb ?? 0), hourly_usd: a.hourly_usd + (r.price_per_hour ?? 0) }),
+    { vcpus: 0, ram_gb: 0, hourly_usd: 0 },
+  );
+  return { instances: rows.length, vcpus: Math.round(t.vcpus), ram_gb: Math.round(t.ram_gb), hourly_usd: Number(t.hourly_usd.toFixed(3)) };
 }
 
 export interface FleetManagerOptions {
@@ -271,7 +301,16 @@ export class FleetManager {
       throw new Error(`Estimated cost $${estimate.toFixed(2)} for ${Math.min(p.count, candidates.length)} instances x ${p.ttl_minutes} min exceeds max_total_cost_usd=${p.max_total_cost_usd}. Nothing was created.`);
     }
     if (p.dry_run) {
-      return { notes, dry_run: { candidates: offers.slice(0, p.count).map(summarizeOffer), estimated_cost_usd: Number(estimate.toFixed(2)), search_returned: searchReturned, after_dedupe: offers.length } };
+      return {
+        notes,
+        dry_run: {
+          candidates: offers.slice(0, p.count).map(summarizeOffer),
+          totals: totalsOf(candidates.slice(0, p.count)),
+          estimated_cost_usd: Number(estimate.toFixed(2)),
+          search_returned: searchReturned,
+          after_dedupe: offers.length,
+        },
+      };
     }
 
     // Fleet record
@@ -575,6 +614,103 @@ export class FleetManager {
     return this.summarize(f);
   }
 
+  /**
+   * Fleet-wide power control. `stop` parks every alive instance (disk kept, no GPU charge);
+   * `start` resumes them all at once and waits until each has been observed running
+   * `running_streak` polls in a row; `wait` only waits. Instances that do not reach the
+   * target in time are destroyed when `destroy_stragglers` is set (start/wait only).
+   */
+  async control(
+    name: string,
+    action: "stop" | "start" | "wait",
+    opts: { timeoutS?: number; runningStreak?: number; pollS?: number; destroyStragglers?: boolean; onProgress?: (m: string) => void } = {},
+  ): Promise<FleetControlResult> {
+    const f = this.get(name);
+    if (!f) throw new Error(`unknown fleet ${name}`);
+    if (f.state === "terminated" || f.state === "terminating") throw new Error(`fleet ${name} is ${f.state}`);
+    const progress = (m: string) => {
+      this.log(m);
+      opts.onProgress?.(m);
+    };
+    const started = Date.now();
+    const timeoutS = opts.timeoutS ?? 1800;
+    const streakWanted = action === "stop" ? 1 : Math.max(1, opts.runningStreak ?? 2);
+    const pollS = Math.max(2, opts.pollS ?? this.pollIntervalS);
+    const target = action === "stop" ? "stopped" : "running";
+    const alive = () => f.members.filter((m) => !m.destroyed_at);
+
+    if (action !== "wait") {
+      const ids = alive().map((m) => m.instance_id);
+      if (!ids.length) throw new Error(`fleet ${name} has no alive instances`);
+      progress(`fleet ${name}: ${action} ${ids.length} instance(s)`);
+      try {
+        const rs = await this.api.setInstancesState(ids, target);
+        const bad = rs.find((r) => !r.success);
+        if (bad) throw new Error(bad.msg ?? "bulk state change reported failure");
+      } catch (e) {
+        progress(`fleet ${name}: bulk ${action} failed (${(e as Error).message}); falling back to per-instance`);
+        await pMap(ids, async (id) => {
+          try {
+            await this.api.setInstanceState(id, target);
+          } catch (e2) {
+            const m = f.members.find((x) => x.instance_id === id);
+            if (m) m.status_message = `${action} failed: ${(e2 as Error).message}`;
+          }
+        }, 16);
+      }
+      f.notes.push(`${action} requested for ${ids.length} instance(s).`);
+      this.save(f);
+    }
+
+    const streak = new Map<number, number>();
+    let reached: number[] = [];
+    let pending: number[] = alive().map((m) => m.instance_id);
+    while (true) {
+      await this.refresh(f);
+      reached = [];
+      pending = [];
+      for (const m of alive()) {
+        const hit = m.status === target;
+        streak.set(m.instance_id, hit ? (streak.get(m.instance_id) ?? 0) + 1 : 0);
+        if ((streak.get(m.instance_id) ?? 0) >= streakWanted) reached.push(m.instance_id);
+        else pending.push(m.instance_id);
+      }
+      const elapsed = (Date.now() - started) / 1000;
+      if (!pending.length || elapsed >= timeoutS || f.state !== "active") break;
+      progress(`fleet ${name}: ${reached.length}/${reached.length + pending.length} ${target} (${Math.round(elapsed)}s)`);
+      await sleep(pollS * 1000);
+    }
+
+    const allReached = pending.length === 0;
+    let destroyed: number[] = [];
+    if (pending.length && action !== "stop" && (opts.destroyStragglers ?? true)) {
+      progress(`fleet ${name}: destroying ${pending.length} instance(s) that did not reach ${target} in time`);
+      try {
+        await this.api.destroyInstances(pending);
+      } catch {
+        await pMap(pending, (id) => this.api.destroyInstance(id).catch(() => undefined), 16);
+      }
+      const t = nowS();
+      for (const m of f.members) if (pending.includes(m.instance_id)) m.destroyed_at = t;
+      destroyed = pending;
+      pending = [];
+      f.notes.push(`Destroyed ${destroyed.length} straggler(s) after ${action}.`);
+      this.save(f);
+    }
+    return {
+      name,
+      action,
+      ok: allReached,
+      target,
+      reached: reached.length,
+      pending_ids: pending,
+      destroyed_ids: destroyed,
+      alive: alive().length,
+      elapsed_s: Math.round((Date.now() - started) / 1000),
+      seconds_remaining: Math.max(0, Math.round(f.deadline_at - nowS())),
+    };
+  }
+
   /** Members that are currently running, with fresh SSH endpoints. */
   async runningMembers(name: string): Promise<{ member: FleetMember; instance: Instance }[]> {
     const f = this.get(name);
@@ -607,6 +743,7 @@ export class FleetManager {
       seconds_remaining: Math.max(0, Math.round(f.deadline_at - t)), ttl_minutes: f.ttl_minutes, target_count: f.target_count,
       counts, alive, running: counts.running ?? 0,
       estimated_cost_usd: Number(cost.toFixed(3)), hourly_cost_usd: Number(hourly.toFixed(3)),
+      totals: totalsOf(f.members.filter((m) => !m.destroyed_at)),
       replacements_made: f.replacements_made, create_failures: f.create_failures.length,
       termination: f.termination ? { ...f.termination, remaining_ids: f.state === "terminated" ? undefined : f.members.filter((m) => !m.destroyed_at).map((m) => m.instance_id) } : undefined,
       notes: f.notes,

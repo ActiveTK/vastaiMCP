@@ -1,0 +1,12 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+const t = new StdioClientTransport({ command: "node", args: ["dist/index.js"], env: { ...process.env, VAST_API_KEY: process.env.VAST_API_KEY ?? "" }, stderr: "pipe" });
+const c = new Client({ name: "smoke", version: "0.0.0" });
+await c.connect(t);
+const tools = await c.listTools();
+console.log("tools:", tools.tools.map(x => x.name).join(", "));
+const r = await c.callTool({ name: "vast_gpu_names", arguments: { contains: "4090" } });
+console.log(r.content[0].text.slice(0, 400));
+const r2 = await c.callTool({ name: "vast_account", arguments: {} });
+console.log("account:", r2.content[0].text.slice(0, 300));
+await c.close();

@@ -92,7 +92,8 @@ export interface CreateInstanceResponse {
 
 export interface SshKey {
   id: number;
-  public_key: string;
+  /** The API returns the key under `ssh_key`. */
+  ssh_key: string;
   [k: string]: unknown;
 }
 

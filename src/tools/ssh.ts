@@ -24,7 +24,7 @@ export function registerSshKeyTools({ server, api, cfg }: ToolContext) {
       switch (action) {
         case "list": {
           const keys = await api.listSshKeys();
-          return ok({ count: keys.length, keys: keys.map((k) => ({ id: k.id, public_key: k.public_key })) });
+          return ok({ count: keys.length, keys: keys.map((k) => ({ id: k.id, public_key: k.ssh_key })) });
         }
         case "add": {
           if (!keySource) throw new Error("No public key given and VAST_SSH_PUBLIC_KEY is not configured.");

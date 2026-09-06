@@ -16,7 +16,7 @@ interface Call {
 /** Minimal fake of the vast.ai API covering the launch workflow. */
 function fakeApi(opts: { createFailsFor?: number[]; statusSequence?: Record<number, string[]> }) {
   const calls: Call[] = [];
-  const sshKeys: { id: number; public_key: string }[] = [];
+  const sshKeys: { id: number; ssh_key: string }[] = [];
   const instances = new Map<number, { actual_status: string | null; polls: number }>();
   let nextId = 1000;
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -26,9 +26,9 @@ function fakeApi(opts: { createFailsFor?: number[]; statusSequence?: Record<numb
     calls.push({ method, path: url.pathname, body });
     const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "Content-Type": "application/json" } });
 
-    if (url.pathname === "/api/v0/ssh/" && method === "GET") return json(sshKeys);
+    if (url.pathname === "/api/v0/ssh/" && method === "GET") return json({ ssh_keys: sshKeys });
     if (url.pathname === "/api/v0/ssh/" && method === "POST") {
-      sshKeys.push({ id: 1, public_key: body.ssh_key });
+      sshKeys.push({ id: 1, ssh_key: body.ssh_key });
       return json({ success: true });
     }
     if (url.pathname === "/api/v0/bundles/" && method === "POST") {

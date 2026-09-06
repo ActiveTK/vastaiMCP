@@ -101,7 +101,7 @@ export async function ensureSshKeyRegistered(api: VastApi, publicKey: string): P
   if (!/^ssh-|^ecdsa-|^sk-/.test(material)) throw new Error("Public key must start with ssh-ed25519 / ssh-rsa / ecdsa-... .");
   const wanted = sshKeyIdentity(material);
   const existing = await api.listSshKeys();
-  if (existing.some((k) => sshKeyIdentity(k.public_key ?? "") === wanted)) return "already_registered";
+  if (existing.some((k) => sshKeyIdentity(k.ssh_key ?? "") === wanted)) return "already_registered";
   await api.addSshKey(material);
   return "registered";
 }
@@ -129,6 +129,12 @@ export function buildCreateBody(p: LaunchParams): CreateInstanceBody {
   };
   if (!p.template_hash) body.runtype = runtypeString(runtype, direct);
   if (runtype === "args" && p.args) body.args = p.args;
+  // Port of vast.py validate_portal_config(): drop jupyter entries from PORTAL_CONFIG for non-jupyter runtypes.
+  if (body.env.PORTAL_CONFIG && body.runtype && !body.runtype.includes("jupyter")) {
+    const kept = body.env.PORTAL_CONFIG.split("|").filter((c) => !c.toLowerCase().includes("jupyter"));
+    if (!kept.length) throw new Error("PORTAL_CONFIG must contain at least one non-jupyter entry when runtype is not jupyter.");
+    body.env.PORTAL_CONFIG = kept.join("|");
+  }
   if (p.volume) {
     const v = p.volume;
     if (!v.create_from_offer_id && !v.link_volume_id) throw new Error("volume needs create_from_offer_id or link_volume_id");

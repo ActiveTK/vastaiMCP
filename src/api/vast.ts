@@ -144,7 +144,7 @@ export class VastApi {
 
   // ---- ssh keys --------------------------------------------------------
 
-  /** vast.py show__ssh_keys: GET /ssh/. */
+  /** vast.py show__ssh_keys: GET /ssh/ -> {"ssh_keys": [{"id", "ssh_key"}]}. */
   async listSshKeys(): Promise<SshKey[]> {
     const r = await this.client.get<SshKey[] | { ssh_keys?: SshKey[] }>("/ssh/");
     if (Array.isArray(r)) return r;

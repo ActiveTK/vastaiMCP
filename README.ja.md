@@ -69,6 +69,7 @@ claude mcp add vastai -e VAST_API_KEY=your_key -- node /path/to/vastaiMCP/dist/i
 | `VAST_SSH_PUBLIC_KEY` | `<VAST_SSH_KEY>.pub` | 起動前にアカウントへ登録する公開鍵（パスまたは文字列） |
 | `VAST_SSH_PASSPHRASE` | – | 秘密鍵のパスフレーズ |
 | `VAST_RETRY` | `3` | HTTP 429 時のリトライ回数 |
+| `VAST_MCP_STATE_DIR` | `~/.vastai-mcp/fleets` | fleet の状態（期限、インスタンス id）の保存先 |
 
 ## ツール一覧
 
@@ -91,6 +92,62 @@ claude mcp add vastai -e VAST_API_KEY=your_key -- node /path/to/vastaiMCP/dist/i
 | `vast_api_execute` | vast の API 経由で `ls` / `rm` / `du`（SSH 不要） |
 | `vast_templates` | テンプレート検索（PyTorch、vLLM、ComfyUI …）。`template_hash` を `vast_launch` に渡せます |
 | `vast_volumes` | 永続ボリュームの list / search / create / delete |
+| **`vast_fleet_launch`** | **N 台を一括で借りて寿命（TTL）を固定**: 検索・順位付け（`strategy: most_cpu` など）・1 マシン 1 台・並列作成・バックグラウンド監視・死んだ台の補充・期限での確実な破棄 |
+| `vast_fleet_status` | 状態別台数、稼働数、残り秒数、ここまでのコスト、破棄の進捗、各メンバーの SSH 接続先 |
+| `vast_fleet_list` | ディスクに永続化された全 fleet |
+| `vast_fleet_run` | fleet の稼働中インスタンス全部に SSH でコマンドを並列実行 |
+| `vast_fleet_extend` | fleet の期限を延長 |
+| `vast_fleet_destroy` | fleet（または全 fleet）を即時破棄。インスタンス一覧で消えたことを検証 |
+
+## Fleet: 多数のインスタンスを決まった時間だけ
+
+`vast_launch` は 1 台用です。「特定テンプレートで、vCPU 数が多いマシンから順に 200 台を 15 分だけ起動し、15 分後に確実に消す」
+のような用途には fleet を使います。
+
+```text
+› vast_fleet_launch {"count": 200, "ttl_minutes": 15, "template_hash": "661d064b…",
+                     "strategy": "most_cpu", "min_cpu_cores": 16, "max_price_per_hour": 0.5,
+                     "name": "crawl-1", "dry_run": true}          ← 候補 200 台と概算コストだけ表示
+› vast_fleet_launch {… 同じ …, "dry_run": false, "max_total_cost_usd": 40}
+{ "fleet": { "name": "crawl-1", "state": "active", "alive": 196, "deadline_at": "…", "seconds_remaining": 887,
+             "counts": {"created": 120, "loading": 60, "running": 16}, "create_failures": 4 } }
+› vast_fleet_run    {"name": "crawl-1", "command": "nohup ./job.sh > job.log 2>&1 &"}
+› vast_fleet_status {"name": "crawl-1"}
+› vast_fleet_destroy {"name": "crawl-1"}                         ← 任意。呼ばなくても期限で破棄されます
+```
+
+fleet ワークフローの中身:
+
+1. **検索と順位付け** – フィルタ付きで `POST /bundles/`。`limit = count × overprovision + 10`、並び順は strategy
+   （`most_cpu` = `cpu_cores_effective` 降順、価格昇順）。既定で物理マシンごとに 1 オファー（`unique_machines`）。
+   `bid_price` 指定時は `min_bid` がそれを超えるオファーを除外。
+2. **コストガード** – 上位 `count` 件の価格 × TTL で概算し、`max_total_cost_usd` を超えるなら何も作らずに中止。
+   `dry_run` なら候補だけ返します。
+3. **並列作成** – `PUT /asks/{id}/` を `create_concurrency` 本のワーカーで実行。必要数を超える同時作成はしません。
+   失敗したオファーは次の候補に流れます。成功は即座にディスクへ永続化。
+4. **監視** – ポーリング 1 回につき `GET /api/v1/instances/` を 1 回（台数分の個別 GET はしない）。状態更新、
+   プロセスが知らない「fleet ラベル付き」インスタンスの取り込み、`exited`/`offline` になった台の補充
+   （`replace_failed`、`max_replacements` 上限、残り 3 分超のときのみ）。
+5. **期限で破棄** – `DELETE /instances/` を 64 件ずつ（失敗時は個別 DELETE にフォールバック）。その後インスタンス一覧を
+   読み直し、残っているもの（ラベル一致も含む）をバックオフ付きで再削除。一覧で消えたことを確認してはじめて `terminated` になります。
+
+破棄は多層で保証されるので、MCP クライアントが接続し続けている必要はありません:
+
+| 層 | 仕組み |
+| --- | --- |
+| プロセス内 | 期限タイマー + 30 秒ごとの watchdog |
+| ディスク | `~/.vastai-mcp/fleets/*.json`（`VAST_MCP_STATE_DIR`）に状態を保存。サーバー起動時に期限切れ fleet を回収 |
+| クライアント切断後 | アクティブな fleet がある間はサーバープロセスが生き残り、全部破棄してから終了 |
+| プロセス外 | `vastai-mcp reap`（残っていれば終了コード 1）。cron / タスクスケジューラに登録可。`--watch` で常駐 |
+| コンテナ内 | `self_destruct`（既定 on）。vast が注入する `CONTAINER_API_KEY` を使い `sleep <ttl>; curl -X DELETE …/instances/$CONTAINER_ID/` を onstart に前置（ベストエフォート。延長する予定なら `self_destruct=false`） |
+
+```bash
+node dist/index.js reap          # 期限切れ fleet を破棄して結果を表示
+node dist/index.js fleets        # 保存されている fleet を表示
+```
+
+注意: TTL は fleet 作成時刻から数えます（各台が `running` になった時刻からではありません）。ストレージは作成時から、
+GPU は `running` から課金されます。`vast_fleet_status.estimated_cost_usd` は価格 × 稼働時間の合計です。
 
 ### 利用例
 
@@ -136,6 +193,7 @@ claude mcp add vastai -e VAST_API_KEY=your_key -- node /path/to/vastaiMCP/dist/i
 | `POST /api/v0/instances/{id}/ssh/`, `DELETE …/ssh/{key}/` | `attach__ssh`, `detach__ssh` | `vast_ssh_keys` |
 | `GET /api/v0/template/?select_cols&select_filters` | `search__templates` | `vast_templates` |
 | `GET /api/v0/volumes?owner=me`, `POST /api/v0/volumes/search/`, `PUT/DELETE /api/v0/volumes/` | `show__volumes`, `search__volumes`, `create__volume`, `delete__volume` | `vast_volumes` |
+| `DELETE /api/v0/instances/` `{instance_ids}`（64 件ずつ） | `vastai.api.instances.destroy_instance`（リスト形式） | `vast_destroy`, fleet |
 
 検索クエリ DSL（`parse_query`）、`env` のエンコード（`parse_env`）、runtype 文字列（`get_runtype`）、
 SSH 接続先の解決（`_ssh_url`）はそのまま移植し、ユニットテストで検証しています。

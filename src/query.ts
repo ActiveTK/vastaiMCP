@@ -168,7 +168,7 @@ export function resolveRegion(region: string): string[] {
 }
 
 export type OfferType = "on-demand" | "bid" | "reserved";
-export type Strategy = "best_value" | "cheapest" | "fastest" | "most_reliable";
+export type Strategy = "best_value" | "cheapest" | "fastest" | "most_reliable" | "most_cpu" | "most_ram" | "most_vram" | "most_disk" | "most_bandwidth";
 
 export interface OfferFilters {
   gpu_name?: string;
@@ -206,6 +206,11 @@ export const STRATEGY_ORDER: Record<Strategy, string> = {
   cheapest: "dph_total",
   fastest: "dlperf-",
   most_reliable: "reliability-,score-",
+  most_cpu: "cpu_cores_effective-,dph_total",
+  most_ram: "cpu_ram-,dph_total",
+  most_vram: "gpu_total_ram-,dph_total",
+  most_disk: "disk_space-,dph_total",
+  most_bandwidth: "inet_down-,dph_total",
 };
 
 /** Build the JSON body for POST /api/v0/bundles/ from structured filters. */

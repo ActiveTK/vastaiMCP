@@ -104,13 +104,21 @@ export function registerInstanceTools({ server, api }: ToolContext) {
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
     guard(async ({ instance_ids }) => {
-      const results = [];
-      for (const id of instance_ids) {
-        try {
-          const r = await api.destroyInstance(id);
-          results.push({ instance_id: id, destroyed: !!r.success, message: r.msg });
-        } catch (e) {
-          results.push({ instance_id: id, destroyed: false, message: (e as Error).message });
+      // Bulk DELETE /instances/ (64 per request, as the CLI does); fall back to per-id deletes on failure.
+      const results: { instance_id: number; destroyed: boolean; message?: string }[] = [];
+      try {
+        const rs = await api.destroyInstances(instance_ids);
+        const failed = rs.find((r) => !r.success);
+        if (failed) throw new Error(failed.msg ?? "bulk destroy reported failure");
+        for (const id of instance_ids) results.push({ instance_id: id, destroyed: true });
+      } catch (bulkErr) {
+        for (const id of instance_ids) {
+          try {
+            const r = await api.destroyInstance(id);
+            results.push({ instance_id: id, destroyed: !!r.success, message: r.msg });
+          } catch (e) {
+            results.push({ instance_id: id, destroyed: false, message: `${(e as Error).message} (bulk: ${(bulkErr as Error).message})` });
+          }
         }
       }
       const res = ok({ results });

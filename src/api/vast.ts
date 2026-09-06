@@ -132,6 +132,18 @@ export class VastApi {
     return this.client.delete(`/instances/${id}/`, { json: {} });
   }
 
+  /**
+   * vastai.api.instances.destroy_instance (list form): DELETE /instances/ {instance_ids}.
+   * The CLI chunks at 64 ids per request; we do the same.
+   */
+  async destroyInstances(ids: number[]): Promise<{ success: boolean; msg?: string }[]> {
+    const out: { success: boolean; msg?: string }[] = [];
+    for (let i = 0; i < ids.length; i += 64) {
+      out.push(await this.client.delete("/instances/", { json: { instance_ids: ids.slice(i, i + 64) } }));
+    }
+    return out;
+  }
+
   /** vast.py label__instance: PUT /instances/{id}/ {label}. */
   async labelInstance(id: number, label: string): Promise<{ success: boolean; msg?: string }> {
     return this.client.put(`/instances/${id}/`, { json: { label } });

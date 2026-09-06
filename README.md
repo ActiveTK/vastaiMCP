@@ -70,6 +70,7 @@ See [examples/mcp-config.json](examples/mcp-config.json).
 | `VAST_SSH_PUBLIC_KEY` | `<VAST_SSH_KEY>.pub` | public key (path or literal) registered on the account before launch |
 | `VAST_SSH_PASSPHRASE` | – | passphrase for the private key |
 | `VAST_RETRY` | `3` | retries on HTTP 429 |
+| `VAST_MCP_STATE_DIR` | `~/.vastai-mcp/fleets` | where fleet state (deadlines, instance ids) is persisted |
 
 ## Tools
 
@@ -92,6 +93,63 @@ See [examples/mcp-config.json](examples/mcp-config.json).
 | `vast_api_execute` | `ls` / `rm` / `du` through vast's own API (no SSH needed) |
 | `vast_templates` | Search templates (PyTorch, vLLM, ComfyUI, …) and get a `template_hash` for `vast_launch` |
 | `vast_volumes` | list / search / create / delete persistent volumes |
+| **`vast_fleet_launch`** | **Rent N machines at once with a hard TTL**: search, rank (`strategy: most_cpu` …), one per machine, parallel create, background monitor, replacement of dead instances, guaranteed destruction at the deadline |
+| `vast_fleet_status` | Per-status counts, alive/running, seconds remaining, cost so far, termination progress, members with SSH endpoints |
+| `vast_fleet_list` | All fleets persisted on disk |
+| `vast_fleet_run` | Run a command over SSH on every running instance of a fleet in parallel |
+| `vast_fleet_extend` | Push a fleet's deadline back |
+| `vast_fleet_destroy` | Destroy a fleet (or all fleets) now, verified against the instance list |
+
+## Fleets: many instances, fixed lifetime
+
+`vast_launch` is for one box. For "start 200 instances from template X on the machines with the most vCPUs,
+keep them for 15 minutes, then make absolutely sure they are gone" use a fleet:
+
+```text
+› vast_fleet_launch {"count": 200, "ttl_minutes": 15, "template_hash": "661d064b…",
+                     "strategy": "most_cpu", "min_cpu_cores": 16, "max_price_per_hour": 0.5,
+                     "name": "crawl-1", "dry_run": true}          ← shows the 200 candidate machines + estimated cost
+› vast_fleet_launch {… same …, "dry_run": false, "max_total_cost_usd": 40}
+{ "fleet": { "name": "crawl-1", "state": "active", "alive": 196, "deadline_at": "…", "seconds_remaining": 887,
+             "counts": {"created": 120, "loading": 60, "running": 16}, "create_failures": 4 } }
+› vast_fleet_run    {"name": "crawl-1", "command": "nohup ./job.sh > job.log 2>&1 &"}
+› vast_fleet_status {"name": "crawl-1"}
+› vast_fleet_destroy {"name": "crawl-1"}                         ← optional; otherwise it happens at the deadline
+```
+
+What the fleet workflow does:
+
+1. **Search & rank** – `POST /bundles/` with your filters, `limit = count × overprovision + 10`, ordered by the
+   strategy (`most_cpu` = `cpu_cores_effective` descending, price ascending). One offer per physical machine by
+   default (`unique_machines`). If `bid_price` is set, offers whose `min_bid` is higher are dropped.
+2. **Cost guard** – estimated cost = top `count` prices × TTL; `max_total_cost_usd` aborts before anything is
+   created. `dry_run` returns the candidates without creating.
+3. **Create in parallel** – `PUT /asks/{id}/` with `create_concurrency` workers, never more in flight than still
+   needed. A failed offer falls through to the next candidate. Every success is persisted immediately.
+4. **Monitor** – one `GET /api/v1/instances/` per poll (not one call per instance) updates statuses, adopts any
+   instance carrying the fleet label that the process does not know about, and replaces instances that reach
+   `exited`/`offline` (`replace_failed`, capped by `max_replacements`, only while > 3 min remain).
+5. **Terminate at the deadline** – `DELETE /instances/` in chunks of 64 (falls back to per-id deletes), then the
+   instance list is re-read; anything still present, including label matches, is deleted again with backoff
+   until nothing remains. The fleet is `terminated` only after verification.
+
+Termination is enforced in layers, so it does not depend on the MCP client staying connected:
+
+| Layer | Mechanism |
+| --- | --- |
+| In-process | deadline timer plus a 30 s watchdog tick |
+| On disk | fleet state in `~/.vastai-mcp/fleets/*.json` (`VAST_MCP_STATE_DIR`); expired fleets are reaped when the server starts |
+| After the client disconnects | the server process stays alive until active fleets are terminated, then exits |
+| Out of process | `vastai-mcp reap` (exit code 1 if anything remains) — put it in cron / Task Scheduler; `vastai-mcp reap --watch` keeps running |
+| In the container | `self_destruct` (default on) prepends `sleep <ttl>; curl -X DELETE …/instances/$CONTAINER_ID/` using vast's `CONTAINER_API_KEY` to the onstart script (best effort; skip with `self_destruct=false` if you plan to extend) |
+
+```bash
+node dist/index.js reap          # destroy fleets whose deadline has passed, print what happened
+node dist/index.js fleets        # show persisted fleets
+```
+
+Notes: the TTL is measured from fleet creation, not from when each instance reaches `running`. Storage is billed
+from creation, GPU time from `running`; `vast_fleet_status.estimated_cost_usd` sums price × running time.
 
 ### Example session
 
@@ -137,6 +195,7 @@ Every tool is built on the same requests `vast.py` makes. Function names refer t
 | `POST /api/v0/instances/{id}/ssh/`, `DELETE …/ssh/{key}/` | `attach__ssh`, `detach__ssh` | `vast_ssh_keys` |
 | `GET /api/v0/template/?select_cols&select_filters` | `search__templates` | `vast_templates` |
 | `GET /api/v0/volumes?owner=me`, `POST /api/v0/volumes/search/`, `PUT/DELETE /api/v0/volumes/` | `show__volumes`, `search__volumes`, `create__volume`, `delete__volume` | `vast_volumes` |
+| `DELETE /api/v0/instances/` `{instance_ids}` (64 per call) | `vastai.api.instances.destroy_instance` (list form) | `vast_destroy`, fleets |
 
 The query DSL (`parse_query`), the `env` encoding (`parse_env`), the runtype strings (`get_runtype`) and the
 SSH endpoint resolution (`_ssh_url`) are ported verbatim and covered by unit tests.

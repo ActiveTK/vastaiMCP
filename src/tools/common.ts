@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { VastApi } from "../api/vast.js";
 import { VastApiError } from "../client.js";
 import type { VastConfig } from "../config.js";
+import type { FleetManager } from "../fleet/manager.js";
 import { compact } from "../format.js";
 import { REGIONS } from "../query.js";
 
@@ -12,6 +13,7 @@ export interface ToolContext {
   api: VastApi;
   cfg: VastConfig;
   server: McpServer;
+  fleets: FleetManager;
 }
 
 export function ok(data: unknown): CallToolResult {
@@ -83,7 +85,7 @@ export const offerFilterShape = {
   host_id: z.number().int().optional().describe("Restrict to a specific host id."),
   raw_query: z.string().optional().describe('Escape hatch using vastai CLI query syntax, e.g. "gpu_ram>=24 pcie_bw>10 geolocation in [US,CA]". Merged on top of the structured filters.'),
   type: z.enum(["on-demand", "bid", "reserved"]).optional().describe('Pricing type. "bid" = interruptible/spot (exposes min_bid).'),
-  strategy: z.enum(["best_value", "cheapest", "fastest", "most_reliable"]).optional().describe("How to rank results (default best_value = vast's score)."),
+  strategy: z.enum(["best_value", "cheapest", "fastest", "most_reliable", "most_cpu", "most_ram", "most_vram", "most_disk", "most_bandwidth"]).optional().describe("How to rank results (default best_value = vast's score). most_cpu = effective vCPU count descending, etc."),
   order: z.string().optional().describe('Explicit sort, comma-separated; suffix "-" for descending, e.g. "dph_total" or "dlperf_usd-". Overrides strategy.'),
 };
 

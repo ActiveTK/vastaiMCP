@@ -23,7 +23,7 @@ export function registerAccountTools({ server, api, cfg }: ToolContext) {
         config: {
           api_url: cfg.baseUrl,
           ssh_private_key: cfg.sshPrivateKeyPath ?? "(none; set VAST_SSH_KEY)",
-          ssh_public_key: cfg.sshPublicKey ?? "(none; set VAST_SSH_PUBLIC_KEY)",
+          ssh_public_key: cfg.sshPublicKey ? (cfg.sshPublicKey.startsWith("ssh-") || cfg.sshPublicKey.includes(" ") ? cfg.sshPublicKey.split(/\s+/).slice(0, 2).join(" ").slice(0, 40) + "… (derived from private key)" : cfg.sshPublicKey) : "(none; set VAST_SSH_PUBLIC_KEY)",
         },
         raw: include_raw ? u : undefined,
       });

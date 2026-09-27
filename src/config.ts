@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -44,6 +45,16 @@ function readApiKeyFile(): string | undefined {
   return undefined;
 }
 
+/** No .pub next to the private key: ask ssh-keygen for the public half (returns literal key material). */
+function derivePublicKey(privateKeyPath: string): string | undefined {
+  try {
+    const out = execFileSync("ssh-keygen", ["-y", "-f", privateKeyPath], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
+    return /^(ssh-|ecdsa-|sk-)/.test(out) ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): VastConfig {
   const home = os.homedir();
   const sshDir = path.join(home, ".ssh");
@@ -60,6 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): VastConfig {
   if (!publicKey && privateKeyPath) {
     const pub = privateKeyPath + ".pub";
     if (fs.existsSync(pub)) publicKey = pub;
+    else publicKey = derivePublicKey(privateKeyPath);
   }
 
   return {

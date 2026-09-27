@@ -105,6 +105,9 @@ export interface UserInfo {
   credit?: number;
   balance_threshold?: number;
   balance_threshold_enabled?: boolean;
+  has_billing?: boolean;
+  can_pay?: boolean;
+  billing_creditonly?: boolean;
   [k: string]: unknown;
 }
 

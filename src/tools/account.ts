@@ -6,21 +6,26 @@ export function registerAccountTools({ server, api, cfg }: ToolContext) {
     "vast_account",
     {
       title: "Account & balance",
-      description: "Show the vast.ai account behind the configured API key: username, email, credit balance, and the SSH key / API configuration this server is using. Call this first to verify authentication.",
-      inputSchema: {},
+      description: "Show the vast.ai account behind the configured API key: username, email, prepaid credit (credit_usd is what instances are paid from; host_balance_usd is host payout balance), and the SSH key / API configuration this server is using. Call this first to verify authentication.",
+      inputSchema: { include_raw: z.boolean().optional().describe("Also return the raw /users/current object (api_key stripped).") },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    guard(async () => {
+    guard(async ({ include_raw }) => {
       const u = await api.getUser();
       return ok({
         user: { id: u.id, username: u.username, email: u.email },
-        balance_usd: u.balance ?? u.credit,
+        // vast.py user_fields exposes both: `credit` is the prepaid client balance you spend on instances,
+        // `balance` is the (host-side) payout balance and is typically 0 for pure clients.
+        credit_usd: typeof u.credit === "number" ? Number(u.credit.toFixed(2)) : undefined,
+        host_balance_usd: typeof u.balance === "number" ? Number(u.balance.toFixed(2)) : undefined,
         balance_threshold_usd: u.balance_threshold_enabled ? u.balance_threshold : undefined,
+        billing: { has_billing: u.has_billing, can_pay: u.can_pay, credit_only: u.billing_creditonly },
         config: {
           api_url: cfg.baseUrl,
           ssh_private_key: cfg.sshPrivateKeyPath ?? "(none; set VAST_SSH_KEY)",
           ssh_public_key: cfg.sshPublicKey ?? "(none; set VAST_SSH_PUBLIC_KEY)",
         },
+        raw: include_raw ? u : undefined,
       });
     }),
   );
